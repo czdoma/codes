@@ -1,0 +1,123 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/Character.h"
+#include "Logging/LogMacros.h"
+#include "kalozkodasCharacter.generated.h"
+
+class UInputComponent;
+class USkeletalMeshComponent;
+class UCameraComponent;
+class UInputAction;
+struct FInputActionValue;
+class AShipWheel;
+
+DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
+
+/**
+ * Basic First Person Character
+ */
+UCLASS(abstract)
+class AkalozkodasCharacter : public ACharacter
+{
+	GENERATED_BODY()
+
+	/** First-person arms mesh (visible to self only). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	USkeletalMeshComponent* FirstPersonMesh;
+
+	/** First-person camera. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	UCameraComponent* FirstPersonCameraComponent;
+
+protected:
+	/** Jump action. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	UInputAction* JumpAction;
+
+	/** Move action. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	UInputAction* MoveAction;
+
+	/** Look action. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	class UInputAction* LookAction;
+
+	/** Mouse look action. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	class UInputAction* MouseLookAction;
+
+	/** Interact action (E key). */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	class UInputAction* InteractAction;
+
+	/** Max yaw offset (in degrees) from the ship's forward vector while steering.
+	 *  Prevents the player from snapping their neck to look directly backward. */
+	UPROPERTY(EditAnywhere, Category = "Steering")
+	float MaxLookYawWhileSteering = 100.f;
+
+public:
+	/** Wheel actor currently within interaction range, if any. */
+	UPROPERTY()
+	AShipWheel* NearbyWheel;
+
+	/** Wheel actor currently being operated (null if walking around freely). */
+	UPROPERTY()
+	AShipWheel* CurrentSteeringWheel;
+
+public:
+	AkalozkodasCharacter();
+
+	/** Called by AShipWheel::Interact. Locks character to the wheel, disabling normal locomotion 
+	 *  so movement inputs can be routed to ship controls instead. */
+	void StartSteering(AShipWheel* Wheel);
+
+	/** Called by AShipWheel::Interact. Unlocks character from the wheel and restores normal movement. */
+	void StopSteering();
+
+	AShipWheel* GetSteeringWheel() const { return CurrentSteeringWheel; }
+
+protected:
+	/** Handles movement input. */
+	void MoveInput(const FInputActionValue& Value);
+
+	/** Resets sail toggle flags when movement keys are released (since MoveInput stops firing at zero input). */
+	void MoveInputCompleted(const FInputActionValue& Value);
+
+	/** Handles camera look input. */
+	void LookInput(const FInputActionValue& Value);
+
+	/** Handles look/aim calls from non-standard or UI inputs. */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	virtual void DoAim(float Yaw, float Pitch);
+
+	/** Handles movement calls from non-standard or UI inputs. */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	virtual void DoMove(float Right, float Forward);
+
+	/** Handles jump start from UI or custom bindings. */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	virtual void DoJumpStart();
+
+	/** Handles jump release from UI or custom bindings. */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	virtual void DoJumpEnd();
+
+	/** Triggered when hitting the interact key (E). */
+	void InteractInput(const FInputActionValue& Value);
+
+	/** Edge-detection flags for W/S while steering to ensure sail steps only trigger once per press. */
+	bool bWasSailUpHeld = false;
+	bool bWasSailDownHeld = false;
+
+protected:
+	/** Binds input actions to functions. */
+	virtual void SetupPlayerInputComponent(UInputComponent* InputComponent) override;
+
+public:
+	virtual void Tick(float DeltaTime) override;
+
+	USkeletalMeshComponent* GetFirstPersonMesh() const { return FirstPersonMesh; }
+	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
+};
