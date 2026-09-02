@@ -1,0 +1,357 @@
+// Fill out your copyright notice in the Description page of Project Settings.
+#include "hajomozgas.h"
+#include "Components/StaticMeshComponent.h"
+#include "Components/SceneComponent.h"
+#include "WaterBodyActor.h"
+#include "WaterBodyComponent.h"
+#include "WaterBodyTypes.h"
+
+// Sets default values
+Ahajomozgas::Ahajomozgas()
+{
+	// Set this pawn to call Tick() every frame. ffg
+	PrimaryActorTick.bCanEverTick = true;
+
+	// Create the ship's root 
+	ShipMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("ShipMesh"));
+	RootComponent = ShipMesh;
+
+	// Turn pyscis
+	ShipMesh->SetSimulatePhysics(true);
+	ShipMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	ShipMesh->SetCollisionObjectType(ECollisionChannel::ECC_PhysicsBody);
+	ShipMesh->SetLinearDamping(1.0f);
+	ShipMesh->SetAngularDamping(5.0f);
+
+	ShipMesh->SetMassOverrideInKg(NAME_None, ShipMassKg, true);
+
+	// hull hardening
+	ShipMesh->BodyInstance.COMNudge = FVector(0.f, 0.f, -250.f);
+	ShipMesh->UpdateOverlaps();
+
+	const float HalfLengthOffset = 1640.f;
+	const float HalfWidthOffset = 590.f;
+	const float FloatPointZ = -300.f;
+
+	FloatPointFrontLeft = CreateDefaultSubobject<USceneComponent>(TEXT("FloatPointFrontLeft"));
+	FloatPointFrontLeft->SetupAttachment(ShipMesh);
+	FloatPointFrontLeft->SetRelativeLocation(FVector(HalfLengthOffset, -HalfWidthOffset, FloatPointZ));
+
+	FloatPointFrontRight = CreateDefaultSubobject<USceneComponent>(TEXT("FloatPointFrontRight"));
+	FloatPointFrontRight->SetupAttachment(ShipMesh);
+	FloatPointFrontRight->SetRelativeLocation(FVector(HalfLengthOffset, HalfWidthOffset, FloatPointZ));
+
+	FloatPointBackLeft = CreateDefaultSubobject<USceneComponent>(TEXT("FloatPointBackLeft"));
+	FloatPointBackLeft->SetupAttachment(ShipMesh);
+	FloatPointBackLeft->SetRelativeLocation(FVector(-HalfLengthOffset, -HalfWidthOffset, FloatPointZ));
+
+	FloatPointBackRight = CreateDefaultSubobject<USceneComponent>(TEXT("FloatPointBackRight"));
+	FloatPointBackRight->SetupAttachment(ShipMesh);
+	FloatPointBackRight->SetRelativeLocation(FVector(-HalfLengthOffset, HalfWidthOffset, FloatPointZ));
+}
+
+// call
+void Ahajomozgas::BeginPlay()
+{
+	Super::BeginPlay();
+
+	if (ShipMesh)
+	{
+		ShipMesh->SetMassOverrideInKg(NAME_None, ShipMassKg, true);
+
+		if (ShipMesh->GetBodyInstance())
+		{
+			ShipMesh->GetBodyInstance()->bOverrideMaxAngularVelocity = true;
+			ShipMesh->GetBodyInstance()->MaxAngularVelocity = 30.f;
+		}
+
+		ShipMesh->SetPhysicsAngularVelocityInRadians(FVector::ZeroVector);
+		SmoothedWaterNormal = FVector::UpVector;
+	}
+}
+
+// Call not done
+void Ahajomozgas::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+	ApplyBuoyancy(DeltaTime);
+	ApplySailPropulsion(DeltaTime);
+	ApplyRudder(DeltaTime);
+}
+
+void Ahajomozgas::ApplyBuoyancy(float DeltaTime)
+{
+	if (!ShipMesh || !OceanToFloatOn)
+	{
+		return;
+	}
+
+	UWaterBodyComponent* WaterComp = OceanToFloatOn->GetWaterBodyComponent();
+	if (!WaterComp)
+	{
+		return;
+	}
+
+	struct FBuoyancySample
+	{
+		USceneComponent* Point = nullptr;
+		FVector WorldLocation = FVector::ZeroVector;
+		FVector WaterNormal = FVector::UpVector;
+		float SubmergedDepth = 0.f;
+	};
+
+	const TArray<USceneComponent*> FloatPoints = {
+		FloatPointFrontLeft, FloatPointFrontRight, FloatPointBackLeft, FloatPointBackRight
+	};
+
+	const float NumFloatPoints = static_cast<float>(FloatPoints.Num());
+
+	TArray<FBuoyancySample> SubmergedSamples;
+	SubmergedSamples.Reserve(FloatPoints.Num());
+
+	FVector AverageWaterNormal = FVector::ZeroVector;
+
+	for (USceneComponent* Point : FloatPoints)
+	{
+		if (!Point)
+		{
+			continue;
+		}
+
+		const FVector WorldLoc = Point->GetComponentLocation();
+		FVector WaterSurfaceLocation;
+		FVector WaterSurfaceNormal;
+		FVector WaterVelocity;
+		float WaterDepth = 0.f;
+
+		const bool bFoundWater = WaterComp->GetWaterSurfaceInfoAtLocation(
+			WorldLoc, WaterSurfaceLocation, WaterSurfaceNormal, WaterVelocity, WaterDepth, true);
+
+		if (!bFoundWater)
+		{
+			if (bShowBuoyancyDebug && GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 0.f, FColor::Red, TEXT("No water found at float point"));
+			}
+			continue;
+		}
+		FWaveInfo WaveInfo;
+		WaveInfo.Normal = WaterSurfaceNormal;
+		const bool bHasWaves = WaterComp->GetWaveInfoAtPosition(WorldLoc, WaterDepth, /*bInSimpleWaves=*/false, WaveInfo);
+		if (bHasWaves)
+		{
+			WaterSurfaceLocation.Z += WaveInfo.Height;
+			WaterSurfaceNormal = WaveInfo.Normal;
+		}
+
+		WaterSurfaceNormal = WaterSurfaceNormal.GetSafeNormal();
+		if (WaterSurfaceNormal.IsNearlyZero())
+		{
+			WaterSurfaceNormal = FVector::UpVector;
+		}
+
+		const float SubmergedDepth = FVector::DotProduct(
+			WaterSurfaceLocation - WorldLoc, WaterSurfaceNormal);
+
+		if (SubmergedDepth <= 0.f)
+		{
+			if (bShowBuoyancyDebug && GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(-1, 0.f, FColor::Orange,
+					FString::Printf(TEXT("ABOVE water by %.1f cm at this point"), -SubmergedDepth));
+			}
+			continue;
+		}
+
+		FBuoyancySample Sample;
+		Sample.Point = Point;
+		Sample.WorldLocation = WorldLoc;
+		Sample.WaterNormal = WaterSurfaceNormal;
+		Sample.SubmergedDepth = SubmergedDepth;
+		SubmergedSamples.Add(Sample);
+		AverageWaterNormal += WaterSurfaceNormal;
+	}
+
+	if (SubmergedSamples.IsEmpty())
+	{
+		return;
+	}
+
+	const float ShipMass = ShipMesh->GetMass();
+	const float GravityCmPerSec2 = 980.f;
+	const float TotalWeight = ShipMass * GravityCmPerSec2;
+
+	const float WeightPerPoint = TotalWeight / NumFloatPoints;
+	const float MassPerPoint = ShipMass / NumFloatPoints;
+
+	const float SpringConstant = WeightPerPoint / FMath::Max(EquilibriumDraftCm, 1.f);
+	const float CriticalDamping = 2.f * FMath::Sqrt(SpringConstant * MassPerPoint);
+	const float ActualDamping = DampingRatio * CriticalDamping;
+	const float MaxLiftPerPoint = WeightPerPoint * FMath::Max(
+		2.f, MaxEffectiveDepth / FMath::Max(EquilibriumDraftCm, 1.f));
+
+	AverageWaterNormal = AverageWaterNormal.GetSafeNormal();
+	if (AverageWaterNormal.IsNearlyZero())
+	{
+		AverageWaterNormal = FVector::UpVector;
+	}
+
+	for (const FBuoyancySample& Sample : SubmergedSamples)
+	{
+		const float ClampedDepth = FMath::Min(Sample.SubmergedDepth, MaxEffectiveDepth);
+		const FVector PointVelocity = ShipMesh->GetPhysicsLinearVelocityAtPoint(Sample.WorldLocation);
+		const float NormalVelocity = FVector::DotProduct(PointVelocity, Sample.WaterNormal);
+
+		const float SpringForce = ClampedDepth * SpringConstant;
+		const float DampingForce = -NormalVelocity * ActualDamping;
+		float ForceMagnitude = FMath::Clamp(SpringForce + DampingForce, 0.f, MaxLiftPerPoint);
+
+		const FVector BuoyancyForce = Sample.WaterNormal * ForceMagnitude;
+		ShipMesh->AddForceAtLocation(BuoyancyForce, Sample.WorldLocation);
+
+		if (bShowBuoyancyDebug && GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 0.f, FColor::Green,
+				FString::Printf(TEXT("BELOW water by %.1f | Lift: %.0f | Wet points: %.0f/%.0f"),
+					Sample.SubmergedDepth, ForceMagnitude, static_cast<float>(SubmergedSamples.Num()), NumFloatPoints));
+		}
+	}
+
+	SmoothedWaterNormal = FMath::VInterpTo(SmoothedWaterNormal, AverageWaterNormal, DeltaTime, 2.f).GetSafeNormal();
+	if (SmoothedWaterNormal.IsNearlyZero())
+	{
+		SmoothedWaterNormal = FVector::UpVector;
+	}
+
+	const FVector LinearVelocity = ShipMesh->GetPhysicsLinearVelocity();
+	FVector HorizontalVelocity = LinearVelocity;
+	HorizontalVelocity.Z = 0.f;
+	ShipMesh->AddForce(-HorizontalVelocity * LinearWaterDrag);
+
+	ApplyUprightStabilization(SmoothedWaterNormal, DeltaTime);
+}
+
+void Ahajomozgas::ApplyUprightStabilization(const FVector& TargetUp, float DeltaTime)
+{
+	if (!ShipMesh)
+	{
+		return;
+	}
+
+	const FVector ShipUp = GetActorUpVector();
+	const FVector TargetUpN = TargetUp.GetSafeNormal();
+	const float CosAngle = FVector::DotProduct(ShipUp, TargetUpN);
+
+	FVector TorqueAxis;
+	float RotationAngle = 0.f;
+
+	if (CosAngle < -0.99f)
+	{
+		TorqueAxis = GetActorForwardVector();
+		RotationAngle = PI;
+	}
+	else
+	{
+		const FQuat DeltaRotation = FQuat::FindBetweenNormals(ShipUp, TargetUpN);
+		DeltaRotation.ToAxisAndAngle(TorqueAxis, RotationAngle);
+
+		if (TorqueAxis.IsNearlyZero() || RotationAngle < KINDA_SMALL_NUMBER)
+		{
+			return;
+		}
+		TorqueAxis.Normalize();
+	}
+
+	const float RotationAngleDegrees = FMath::RadiansToDegrees(RotationAngle);
+	const float CorrectionAlpha = FMath::GetMappedRangeValueClamped(
+		FVector2D(NaturalTiltToleranceDegrees, FullCorrectionAngleDegrees),
+		FVector2D(0.f, 1.f),
+		RotationAngleDegrees);
+
+	if (CorrectionAlpha <= 0.f)
+	{
+		return;
+	}
+
+	const FVector WorldAngularVelocity = ShipMesh->GetPhysicsAngularVelocityInRadians();
+	const FVector LocalAngularVelocity = ShipMesh->GetComponentTransform().InverseTransformVectorNoScale(WorldAngularVelocity);
+	const FVector LocalRollPitchVelocity(LocalAngularVelocity.X, LocalAngularVelocity.Y, 0.f);
+	const FVector WorldRollPitchVelocity = ShipMesh->GetComponentTransform().TransformVectorNoScale(LocalRollPitchVelocity);
+
+	const FVector StabilizationTorque = CorrectionAlpha * (
+		TorqueAxis * RotationAngle * UprightStabilizationStrength
+		- WorldRollPitchVelocity * UprightStabilizationDamping);
+
+	ShipMesh->AddTorqueInRadians(StabilizationTorque);
+}
+
+void Ahajomozgas::ApplySailPropulsion(float DeltaTime)
+{
+	if (!ShipMesh)
+	{
+		return;
+	}
+
+	// Constant thrust per state 
+	float ThrustMagnitude = 0.f;
+	switch (CurrentSailState)
+	{
+	case ESailState::Anchored:
+		ThrustMagnitude = 0.f;
+		break;
+	case ESailState::HalfSail:
+		ThrustMagnitude = HalfSailForce;
+		break;
+	case ESailState::FullSail:
+		ThrustMagnitude = FullSailForce;
+		break;
+	}
+
+	if (ThrustMagnitude > 0.f)
+	{
+		
+		ShipMesh->AddForce(-GetActorForwardVector() * ThrustMagnitude);
+	}
+}
+
+void Ahajomozgas::ApplyRudder(float DeltaTime)
+{
+	if (!ShipMesh || FMath::IsNearlyZero(CurrentRudderInput))
+	{
+		return;
+	}
+
+	const FVector SternLocation = ShipMesh->GetComponentTransform().TransformPosition(FVector(-1640.f, 0.f, -100.f));
+	const FVector TurnForce = GetActorRightVector() * CurrentRudderInput * TurnForceStrength;
+	ShipMesh->AddForceAtLocation(TurnForce, SternLocation);
+
+	const FVector TurnTorque = FVector(0.f, 0.f, CurrentRudderInput * TurnTorqueStrength);
+	ShipMesh->AddTorqueInRadians(TurnTorque);
+}
+
+// Called 
+void Ahajomozgas::RaiseSail()
+{
+	if (CurrentSailState == ESailState::Anchored)
+	{
+		CurrentSailState = ESailState::HalfSail;
+	}
+	else if (CurrentSailState == ESailState::HalfSail)
+	{
+		CurrentSailState = ESailState::FullSail;
+	}
+	// Already Full Sail
+}
+
+void Ahajomozgas::LowerSail()
+{
+	if (CurrentSailState == ESailState::FullSail)
+	{
+		CurrentSailState = ESailState::HalfSail;
+	}
+	else if (CurrentSailState == ESailState::HalfSail)
+	{
+		CurrentSailState = ESailState::Anchored;
+	}
+	// Already Anchored:
+}
