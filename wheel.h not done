@@ -1,0 +1,96 @@
+// ShipWheel.h
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/Actor.h"
+#include "ShipWheel.generated.h"
+
+class UBoxComponent;
+class UStaticMeshComponent;
+class USceneComponent;
+class Ahajomozgas;
+class AkalozkodasCharacter;
+
+UCLASS()
+class KALOZKODAS_API AShipWheel : public AActor
+{
+	GENERATED_BODY()
+
+public:
+	AShipWheel();
+
+	/** Which ship this wheel controls. Set this in the editor's Details panel. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ship")
+	Ahajomozgas* ShipToControl;
+
+	/** Where the character should stand while steering -- move this in the editor to sit right
+	 *  in front of the wheel mesh, facing it. The character snaps here and rides along with the
+	 *  ship (this is a child of the wheel, which is itself attached to the ship, so it moves and
+	 *  rotates correctly with the waves). */
+	UPROPERTY(VisibleAnywhere)
+	USceneComponent* SteeringAttachPoint;
+
+	/** How far the wheel can turn from center in either direction, in degrees. This also defines
+	 *  full rudder lock -- reaching this angle means maximum turning force on the ship. */
+	UPROPERTY(EditAnywhere, Category = "Wheel")
+	float MaxWheelAngleDegrees = 90.f;
+
+	/** How fast holding A/D turns the wheel, in degrees per second. */
+	UPROPERTY(EditAnywhere, Category = "Wheel")
+	float WheelTurnSpeedDegreesPerSec = 60.f;
+
+	/** Called every frame while a character is actively steering (from the character's input
+	 *  handling). Direction is -1..1 (A/D), DeltaTime scales the turn speed correctly per frame. */
+	void TurnWheel(float Direction, float DeltaTime);
+
+	/** Resets the wheel to dead center -- call this when someone starts steering, so a previous
+	 *  user's rudder angle doesn't carry over oddly. */
+	void ResetWheelToCenter();
+
+	/** Returns -1..1 based on the current wheel angle; this is fed directly to the ship as rudder input. */
+	float GetNormalizedRudder() const { return MaxWheelAngleDegrees > 0.f ? CurrentWheelAngleDegrees / MaxWheelAngleDegrees : 0.f; }
+
+	/** Whether anyone is currently attached/steering at this wheel -- prevents two players
+	 *  grabbing the same wheel at once. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Wheel")
+	bool bIsBeingSteered = false;
+
+	/** Called when the player presses E while standing near this wheel. Toggles steering on/off. */
+	UFUNCTION(BlueprintCallable)
+	void Interact(APawn* InteractingPawn);
+
+protected:
+	/** Invisible trigger box the player has to be standing in to interact */
+	UPROPERTY(VisibleAnywhere)
+	UBoxComponent* InteractionVolume;
+
+	/** The visible wheel prop that physically spins as the player turns it. Attached under
+	 *  WheelPivot (not the root directly) -- see WheelPivot's comment for why. */
+	UPROPERTY(VisibleAnywhere)
+	UStaticMeshComponent* WheelMesh;
+
+	/** Sits exactly at the wheel's true visual center of rotation. WheelMesh is attached to this
+	 *  instead of rotating directly, because the wheel mesh asset's own internal pivot point isn't
+	 *  centered on the wheel's hub -- rotating the mesh directly makes it sweep in a big circle
+	 *  instead of spinning in place. We rotate THIS component instead, and reposition WheelMesh's
+	 *  Relative Location (in the editor, by eye) so it lines up correctly underneath it. */
+	UPROPERTY(VisibleAnywhere)
+	USceneComponent* WheelPivot;
+
+	UFUNCTION()
+	void OnOverlapBegin(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
+		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
+
+	UFUNCTION()
+	void OnOverlapEnd(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
+		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
+
+	/** Who is currently standing in the trigger box, if anyone */
+	APawn* OverlappingPawn;
+
+	/** Current wheel rotation from center, in degrees (-MaxWheelAngleDegrees..+MaxWheelAngleDegrees). */
+	float CurrentWheelAngleDegrees = 0.f;
+
+public:
+	APawn* GetOverlappingPawn() const { return OverlappingPawn; }
+};
