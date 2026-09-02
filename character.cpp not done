@@ -1,0 +1,227 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "kalozkodasCharacter.h"
+#include "Animation/AnimInstance.h"
+#include "Camera/CameraComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "EnhancedInputComponent.h"
+#include "InputActionValue.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/PlayerController.h"
+#include "kalozkodas.h"
+#include "ShipWheel.h"
+#include "hajomozgas.h"
+
+AkalozkodasCharacter::AkalozkodasCharacter()
+{
+	// Set size for collision capsule
+	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
+
+	// Create the first person mesh that will be viewed only by this character's owner
+	FirstPersonMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("First Person Mesh"));
+
+	FirstPersonMesh->SetupAttachment(GetMesh());
+	FirstPersonMesh->SetOnlyOwnerSee(true);
+	FirstPersonMesh->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
+	FirstPersonMesh->SetCollisionProfileName(FName("NoCollision"));
+
+	// Create the Camera Component	
+	FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("First Person Camera"));
+	FirstPersonCameraComponent->SetupAttachment(FirstPersonMesh, FName("head"));
+	FirstPersonCameraComponent->SetRelativeLocationAndRotation(FVector(-2.8f, 5.89f, 0.0f), FRotator(0.0f, 90.0f, -90.0f));
+	FirstPersonCameraComponent->bUsePawnControlRotation = true;
+	FirstPersonCameraComponent->bEnableFirstPersonFieldOfView = true;
+	FirstPersonCameraComponent->bEnableFirstPersonScale = true;
+	FirstPersonCameraComponent->FirstPersonFieldOfView = 70.0f;
+	FirstPersonCameraComponent->FirstPersonScale = 0.6f;
+
+	// configure the character comps
+	GetMesh()->SetOwnerNoSee(true);
+	GetMesh()->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::WorldSpaceRepresentation;
+
+	GetCapsuleComponent()->SetCapsuleSize(34.0f, 96.0f);
+
+	// Configure character movement
+	GetCharacterMovement()->BrakingDecelerationFalling = 1500.0f;
+	GetCharacterMovement()->AirControl = 0.5f;
+}
+
+void AkalozkodasCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+{
+	// Set up action bindings
+	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
+	{
+		// Jumping
+		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &AkalozkodasCharacter::DoJumpStart);
+		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &AkalozkodasCharacter::DoJumpEnd);
+
+		// Moving
+		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AkalozkodasCharacter::MoveInput);
+		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Completed, this, &AkalozkodasCharacter::MoveInputCompleted);
+
+		// Looking/Aiming
+		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AkalozkodasCharacter::LookInput);
+		EnhancedInputComponent->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &AkalozkodasCharacter::LookInput);
+
+		// Interacting
+		EnhancedInputComponent->BindAction(InteractAction, ETriggerEvent::Started, this, &AkalozkodasCharacter::InteractInput);
+	}
+	else
+	{
+		UE_LOG(Logkalozkodas, Error, TEXT("'%s' Failed to find an Enhanced Input Component! This template is built to use the Enhanced Input system. If you intend to use the legacy system, then you will need to update this C++ file."), *GetNameSafe(this));
+	}
+}
+
+void AkalozkodasCharacter::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	// While steering, clamp the camera's yaw relative to the ship's current forward direction so
+	// the player can't turn all the way around and look behind themselves. Since the character is
+	// attached to the wheel (which is attached to the ship), GetActorRotation() already follows
+	// the ship's yaw automatically -- we just clamp the controller's look rotation around that.
+	if (CurrentSteeringWheel && GetController())
+	{
+		const float ShipForwardYaw = GetActorRotation().Yaw;
+		FRotator ControlRot = GetController()->GetControlRotation();
+
+		float RelativeYaw = FMath::UnwindDegrees(ControlRot.Yaw - ShipForwardYaw);
+		RelativeYaw = FMath::Clamp(RelativeYaw, -MaxLookYawWhileSteering, MaxLookYawWhileSteering);
+
+		ControlRot.Yaw = ShipForwardYaw + RelativeYaw;
+		GetController()->SetControlRotation(ControlRot);
+	}
+}
+
+void AkalozkodasCharacter::MoveInput(const FInputActionValue& Value)
+{
+	// get the Vector2D move axis
+	FVector2D MovementVector = Value.Get<FVector2D>();
+
+	if (CurrentSteeringWheel)
+	{
+		// While steering, A/D (X) turns the wheel instead of strafing, and W/S (Y) steps the
+		// ship's sail state instead of walking. The character doesn't move at all here --
+		// it's snapped in place at the wheel.
+		CurrentSteeringWheel->TurnWheel(MovementVector.X, GetWorld()->GetDeltaSeconds());
+
+		const bool bSailUpHeld = MovementVector.Y > 0.5f;
+		const bool bSailDownHeld = MovementVector.Y < -0.5f;
+
+		// Edge-detect so holding the key doesn't repeatedly step the sail state every frame --
+		// only the moment it's first pressed counts, matching "press W to raise sail one step".
+		if (bSailUpHeld && !bWasSailUpHeld && CurrentSteeringWheel->ShipToControl)
+		{
+			CurrentSteeringWheel->ShipToControl->RaiseSail();
+		}
+		if (bSailDownHeld && !bWasSailDownHeld && CurrentSteeringWheel->ShipToControl)
+		{
+			CurrentSteeringWheel->ShipToControl->LowerSail();
+		}
+		bWasSailUpHeld = bSailUpHeld;
+		bWasSailDownHeld = bSailDownHeld;
+		return;
+	}
+
+	// pass the axis values to the move input
+	DoMove(MovementVector.X, MovementVector.Y);
+}
+
+void AkalozkodasCharacter::MoveInputCompleted(const FInputActionValue& Value)
+{
+	// Movement input dropped back to zero (all keys released). Reset the sail edge-detect flags
+	// here, since MoveInput() itself won't be called again until a key is pressed -- without this,
+	// the first W press would work once, then get permanently "stuck" thinking W is still held.
+	bWasSailUpHeld = false;
+	bWasSailDownHeld = false;
+}
+
+void AkalozkodasCharacter::LookInput(const FInputActionValue& Value)
+{
+	// get the Vector2D look axis
+	FVector2D LookAxisVector = Value.Get<FVector2D>();
+
+	// pass the axis values to the aim input -- clamping while steering happens afterward, in
+	// Tick(), so this still works normally and just gets corrected if it goes too far.
+	DoAim(LookAxisVector.X, LookAxisVector.Y);
+}
+
+void AkalozkodasCharacter::InteractInput(const FInputActionValue& Value)
+{
+	// If we're currently steering a wheel, pressing E should always release THAT wheel,
+	// regardless of whether NearbyWheel still thinks we're near anything (it won't be, since
+	// our capsule collision is disabled while attached, so it can no longer generate overlaps).
+	if (CurrentSteeringWheel)
+	{
+		CurrentSteeringWheel->Interact(this);
+		return;
+	}
+
+	// Otherwise, normal case: interact with whatever wheel we're standing near.
+	if (NearbyWheel)
+	{
+		NearbyWheel->Interact(this);
+	}
+}
+
+void AkalozkodasCharacter::StartSteering(AShipWheel* Wheel)
+{
+	if (!Wheel)
+	{
+		return;
+	}
+
+	CurrentSteeringWheel = Wheel;
+	bWasSailUpHeld = false;
+	bWasSailDownHeld = false;
+
+	GetCharacterMovement()->SetMovementMode(MOVE_None);
+
+	// Stop the capsule from fighting the ship's hull collision while attached
+	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	AttachToComponent(Wheel->SteeringAttachPoint, FAttachmentTransformRules::SnapToTargetIncludingScale);
+}
+
+void AkalozkodasCharacter::StopSteering()
+{
+	CurrentSteeringWheel = nullptr;
+	DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+	GetCharacterMovement()->SetMovementMode(MOVE_Walking);
+
+	// Restore normal collision now that we're walking freely again
+	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+}
+
+void AkalozkodasCharacter::DoAim(float Yaw, float Pitch)
+{
+	if (GetController())
+	{
+		// pass the rotation inputs
+		AddControllerYawInput(Yaw);
+		AddControllerPitchInput(Pitch);
+	}
+}
+
+void AkalozkodasCharacter::DoMove(float Right, float Forward)
+{
+	if (GetController())
+	{
+		// pass the move inputs
+		AddMovementInput(GetActorRightVector(), Right);
+		AddMovementInput(GetActorForwardVector(), Forward);
+	}
+}
+
+void AkalozkodasCharacter::DoJumpStart()
+{
+	// pass Jump to the character
+	Jump();
+}
+
+void AkalozkodasCharacter::DoJumpEnd()
+{
+	// pass StopJumping to the character
+	StopJumping();
+}
